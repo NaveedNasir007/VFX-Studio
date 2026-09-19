@@ -222,7 +222,7 @@ export default function EditorScreen({ route, navigation }: EditorScreenProps) {
         <TouchableOpacity style={styles.iconButton} onPress={() => navigation.goBack()}><ChevronLeft color={colors.text} size={28} /></TouchableOpacity>
         <View style={styles.headerCenter}><Text style={styles.projectName}>{currentProject?.name || 'Project'}</Text></View>
         <View style={styles.headerActions}>
-          <TouchableOpacity style={[styles.iconButton, styles.exportButton]}>
+          <TouchableOpacity style={[styles.iconButton, styles.exportButton]} onPress={() => navigation.navigate('Export', { projectId: currentProject?.id || projectId })}>
             <Download color={colors.background} size={20} />
             <Text style={styles.exportText}>Export</Text>
           </TouchableOpacity>

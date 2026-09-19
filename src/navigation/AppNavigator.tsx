@@ -4,9 +4,9 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { RootStackParamList } from './types';
 import { colors } from '../theme/colors';
 
-// Placeholder screens
 import HomeScreen from '../screens/HomeScreen';
 import EditorScreen from '../screens/EditorScreen';
+import ExportScreen from '../screens/ExportScreen';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
@@ -44,6 +44,7 @@ export default function AppNavigator() {
           component={EditorScreen}
           options={{ headerShown: false }}
         />
+        <Stack.Screen name="Export" component={ExportScreen} options={{ headerShown: false, presentation: "modal" }} />
       </Stack.Navigator>
     </NavigationContainer>
   );
