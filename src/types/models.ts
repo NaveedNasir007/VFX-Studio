@@ -43,6 +43,20 @@ export interface Adjustments {
   temperature?: number; // -1 to 1
 }
 
+// Phase 4
+export interface EffectData {
+  id: string;
+  name: string;
+  intensity: number; // 0 to 1
+  duration?: number; // optionally limit effect to part of the clip
+}
+
+export interface TransitionData {
+  id: string;
+  name: string;
+  durationMs: number;
+}
+
 export interface Clip {
   id: string;
   mediaUri?: string; // Optional for text/stickers
@@ -56,4 +70,11 @@ export interface Clip {
   textData?: TextData;
   filter?: FilterData;
   adjustments?: Adjustments;
+
+  // Phase 4 additions
+  speed?: number; // e.g. 0.5 for half speed, 2.0 for double speed (default is undefined or 1)
+  isReversed?: boolean; // defaults to false
+  effect?: EffectData;
+  transitionIn?: TransitionData;
+  transitionOut?: TransitionData;
 }

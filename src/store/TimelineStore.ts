@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { TimelineData, Clip, Track, TextData, FilterData, Adjustments } from '../types/models';
+import { TimelineData, Clip, Track, TransitionData, EffectData } from '../types/models';
 import uuid from 'react-native-uuid';
 import { ProjectService } from '../database/ProjectService';
 import { Project } from '../types/models';
@@ -25,25 +25,35 @@ interface TimelineState {
   addTextClip: (text: string, startMs: number, durationMs?: number) => Promise<void>;
   addAudioClip: (mediaUri: string, startMs: number, mediaDuration: number) => Promise<void>;
   updateClipProperties: (clipId: string, updates: Partial<Clip>) => Promise<void>;
+
+  // Phase 4
+  updateClipSpeed: (clipId: string, speedMultiplier: number) => Promise<void>;
+  toggleClipReverse: (clipId: string) => Promise<void>;
+  applyTransition: (clipId: string, transition: TransitionData, position: 'in' | 'out') => Promise<void>;
+  applyEffect: (clipId: string, effect: EffectData) => Promise<void>;
+  insertFreezeFrame: (clipId: string, atTimelineMs: number) => Promise<void>;
 }
 
 const recalculateTrackTiming = (tracks: Track[]) => {
   let maxDuration = 0;
 
   const updatedTracks = tracks.map(track => {
-    // Only auto-sequence clips on the main video track
-    // Audio and Text layers are typically freely positioned (absolute timing)
     if (track.type === 'video' && track.id === 'main') {
       let currentStart = 0;
       const updatedClips = track.clips.map(clip => {
-        const updatedClip = { ...clip, start: currentStart };
-        currentStart += clip.duration;
+        // If clip has speed, duration is scaled relative to mediaDuration
+        let calculatedDuration = clip.duration;
+        if (clip.speed && clip.speed !== 1) {
+           calculatedDuration = Math.round((clip.mediaDuration - clip.mediaStart) / clip.speed);
+        }
+
+        const updatedClip = { ...clip, start: currentStart, duration: calculatedDuration };
+        currentStart += calculatedDuration;
         return updatedClip;
       });
       if (currentStart > maxDuration) maxDuration = currentStart;
       return { ...track, clips: updatedClips };
     } else {
-      // Free positioning tracks (text, audio, overlay video)
       track.clips.forEach(clip => {
         const end = clip.start + clip.duration;
         if (end > maxDuration) maxDuration = end;
@@ -74,7 +84,6 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 
   addClipsToMainTrack: async (assets) => {
     const { timelineData, saveTimelineToProject } = get();
-
     let mainTrackIndex = timelineData.tracks.findIndex(t => t.type === 'video' && t.id === 'main');
     let tracks = [...timelineData.tracks];
 
@@ -101,7 +110,6 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
     tracks[mainTrackIndex] = mainTrack;
 
     const { tracks: recalculatedTracks, duration } = recalculateTrackTiming(tracks);
-
     set({ timelineData: { tracks: recalculatedTracks, duration } });
     await saveTimelineToProject();
   },
@@ -112,7 +120,6 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
     let tracks = [...timelineData.tracks];
 
     if (textTrackIndex === -1) {
-      // Create new text track
       tracks.push({ id: `text_${uuid.v4()}`, type: 'text', clips: [] });
       textTrackIndex = tracks.length - 1;
     }
@@ -172,12 +179,10 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 
   updateClipProperties: async (clipId, updates) => {
     const { timelineData, saveTimelineToProject } = get();
-
     let modified = false;
     const updatedTracks = timelineData.tracks.map(track => {
       const clipIndex = track.clips.findIndex(c => c.id === clipId);
       if (clipIndex === -1) return track;
-
       const newClips = [...track.clips];
       newClips[clipIndex] = { ...newClips[clipIndex], ...updates };
       modified = true;
@@ -215,12 +220,20 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
       }
 
       const splitOffset = splitTimeAtTimeline - clip.start;
-      const firstHalf: Clip = { ...clip, duration: splitOffset };
+
+      const speed = clip.speed || 1;
+      const splitMediaOffset = splitOffset * speed;
+
+      const firstHalf: Clip = {
+        ...clip,
+        duration: splitOffset
+      };
+
       const secondHalf: Clip = {
         ...clip,
         id: uuid.v4() as string,
-        mediaStart: clip.mediaStart + splitOffset,
-        start: clip.start + splitOffset, // Needed for freely positioned clips
+        mediaStart: clip.mediaStart + splitMediaOffset,
+        start: clip.start + splitOffset,
         duration: clip.duration - splitOffset
       };
 
@@ -244,12 +257,14 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
       if (clipIndex === -1) return track;
 
       const clip = track.clips[clipIndex];
+      const speed = clip.speed || 1;
+
       const newDuration = Math.max(100, clip.duration - startTrimAmount - endTrimAmount);
       const actualTrimStart = clip.duration - newDuration - endTrimAmount;
 
       const updatedClip: Clip = {
         ...clip,
-        mediaStart: clip.mediaStart + actualTrimStart,
+        mediaStart: clip.mediaStart + (actualTrimStart * speed),
         start: track.id !== 'main' ? clip.start + startTrimAmount : clip.start,
         duration: newDuration
       };
@@ -267,7 +282,7 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
   reorderClips: async (trackId: string, fromIndex: number, toIndex: number) => {
     const { timelineData, saveTimelineToProject } = get();
     const updatedTracks = timelineData.tracks.map(track => {
-      if (track.id !== trackId || track.id !== 'main') return track; // Only reorder on sequenced track for now
+      if (track.id !== trackId || track.id !== 'main') return track;
       const newClips = [...track.clips];
       const [movedClip] = newClips.splice(fromIndex, 1);
       newClips.splice(toIndex, 0, movedClip);
@@ -277,6 +292,81 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
     const { tracks, duration } = recalculateTrackTiming(updatedTracks);
     set({ timelineData: { tracks, duration } });
     await saveTimelineToProject();
+  },
+
+  // Phase 4 specific actions
+  updateClipSpeed: async (clipId: string, speedMultiplier: number) => {
+    const { updateClipProperties } = get();
+    await updateClipProperties(clipId, { speed: speedMultiplier });
+    // recalculateTrackTiming in updateClipProperties will naturally stretch/compress the clip's duration based on the new speed.
+  },
+
+  toggleClipReverse: async (clipId: string) => {
+    const { timelineData, updateClipProperties } = get();
+    let current = false;
+    timelineData.tracks.forEach(t => t.clips.forEach(c => { if(c.id === clipId) current = !!c.isReversed }));
+    await updateClipProperties(clipId, { isReversed: !current });
+  },
+
+  applyTransition: async (clipId: string, transition: TransitionData, position: 'in' | 'out') => {
+    const { updateClipProperties } = get();
+    if (position === 'in') {
+      await updateClipProperties(clipId, { transitionIn: transition });
+    } else {
+      await updateClipProperties(clipId, { transitionOut: transition });
+    }
+  },
+
+  applyEffect: async (clipId: string, effect: EffectData) => {
+    const { updateClipProperties } = get();
+    await updateClipProperties(clipId, { effect });
+  },
+
+  insertFreezeFrame: async (clipId: string, atTimelineMs: number) => {
+    const { timelineData, splitClip, saveTimelineToProject } = get();
+
+    // First, split the clip exactly at the playhead
+    await splitClip(clipId, atTimelineMs);
+
+    // Refresh state after split
+    const currentData = get().timelineData;
+    let modified = false;
+
+    const updatedTracks = currentData.tracks.map(track => {
+      if (track.id !== 'main') return track;
+
+      // The split action created a new clip that starts exactly at atTimelineMs.
+      const secondHalfIndex = track.clips.findIndex(c => c.start === atTimelineMs && c.type === 'video');
+
+      if (secondHalfIndex > 0) {
+        const firstHalf = track.clips[secondHalfIndex - 1];
+
+        // Create a 3-second freeze frame clip referencing the exact frame
+        // In reality, mediaUri points to the video, but we tag it as an image to indicate freeze
+        const freezeClip: Clip = {
+          id: uuid.v4() as string,
+          mediaUri: firstHalf.mediaUri, // The original video URI
+          type: 'image', // Treated as a static frame for 3 seconds
+          start: atTimelineMs,
+          duration: 3000,
+          mediaStart: firstHalf.mediaStart + (firstHalf.duration * (firstHalf.speed || 1)), // The exact frame to freeze
+          mediaDuration: 3000
+        };
+
+        const newClips = [...track.clips];
+        // Insert freeze frame between the two split halves
+        newClips.splice(secondHalfIndex, 0, freezeClip);
+        modified = true;
+        return { ...track, clips: newClips };
+      }
+      return track;
+    });
+
+    if (modified) {
+      const { tracks, duration } = recalculateTrackTiming(updatedTracks);
+      set({ timelineData: { tracks, duration } });
+      await saveTimelineToProject();
+    }
   },
 
   saveTimelineToProject: async () => {
