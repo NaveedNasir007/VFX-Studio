@@ -1,47 +1,142 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Image } from 'react-native';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { ChevronLeft, Download, Undo, Redo } from 'lucide-react-native';
+import { ChevronLeft, Download, Undo, Redo, Play, Pause, Scissors, Trash2 } from 'lucide-react-native';
 import { colors } from '../theme/colors';
 import { typography } from '../theme/typography';
 import { EditorScreenProps } from '../navigation/types';
 import { useTimelineStore } from '../store/TimelineStore';
 import { useProjectStore } from '../store/ProjectStore';
+import Timeline from '../components/Timeline';
 import { Clip } from '../types/models';
 
 export default function EditorScreen({ route, navigation }: EditorScreenProps) {
   const { projectId } = route.params;
   const insets = useSafeAreaInsets();
   const { projects } = useProjectStore();
-  const { timelineData, currentProject, loadProjectTimeline } = useTimelineStore();
+  const { timelineData, currentProject, loadProjectTimeline, selectedClipId, splitClip, deleteClip } = useTimelineStore();
 
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playheadPos, setPlayheadPos] = useState(0); // in ms
   const [activeClip, setActiveClip] = useState<Clip | null>(null);
+  const animationRef = useRef<number>();
+  const lastUpdateRef = useRef<number>(0);
 
   useEffect(() => {
     if (currentProject?.id !== projectId) {
       const proj = projects.find(p => p.id === projectId);
-      if (proj) {
-        loadProjectTimeline(proj);
-      }
+      if (proj) loadProjectTimeline(proj);
     }
   }, [projectId, projects, currentProject?.id, loadProjectTimeline]);
 
+  // Sync playhead to active clip
   useEffect(() => {
-    if (timelineData?.tracks?.length > 0) {
-      const mainTrack = timelineData.tracks.find(t => t.id === 'main');
-      if (mainTrack && mainTrack.clips.length > 0) {
-        setActiveClip(mainTrack.clips[0]);
+    if (!timelineData?.tracks?.length) {
+      setActiveClip(null);
+      return;
+    }
+
+    // Find clip that encompasses playheadPos
+    let foundClip: Clip | null = null;
+    for (const track of timelineData.tracks) {
+      if (track.type === 'video') {
+        foundClip = track.clips.find(c => playheadPos >= c.start && playheadPos < c.start + c.duration) || null;
+        if (foundClip) break;
       }
     }
-  }, [timelineData]);
+
+    // If end of timeline, clear or keep last
+    if (!foundClip && timelineData.duration > 0 && playheadPos >= timelineData.duration) {
+      setIsPlaying(false);
+      setPlayheadPos(timelineData.duration);
+    }
+
+    // Detect clip switch
+    if (foundClip?.id !== activeClip?.id) {
+      setActiveClip(foundClip);
+    }
+  }, [playheadPos, timelineData]);
 
   const player = useVideoPlayer(
     activeClip?.type === 'video' ? activeClip.mediaUri : null,
     (player) => {
-      player.loop = true;
+      // Loop individual clips for now if testing, but typically we manage timeline time
+      player.loop = false;
     }
   );
+
+  useEffect(() => {
+    if (activeClip?.type === 'video') {
+      if (isPlaying) {
+        player.play();
+      } else {
+        player.pause();
+      }
+    }
+  }, [isPlaying, activeClip, player]);
+
+  // Playhead Tick Engine
+  const playheadTick = (timestamp: number) => {
+    if (!lastUpdateRef.current) lastUpdateRef.current = timestamp;
+    const delta = timestamp - lastUpdateRef.current;
+
+    setPlayheadPos(prev => {
+      const next = prev + delta;
+      if (next >= (timelineData?.duration || 0)) {
+        setIsPlaying(false);
+        return timelineData?.duration || 0;
+      }
+      return next;
+    });
+
+    lastUpdateRef.current = timestamp;
+    if (isPlaying) {
+      animationRef.current = requestAnimationFrame(playheadTick);
+    }
+  };
+
+  useEffect(() => {
+    if (isPlaying) {
+      lastUpdateRef.current = performance.now();
+      animationRef.current = requestAnimationFrame(playheadTick);
+    } else {
+      if (animationRef.current) cancelAnimationFrame(animationRef.current);
+    }
+    return () => {
+      if (animationRef.current) cancelAnimationFrame(animationRef.current);
+    };
+  }, [isPlaying, timelineData?.duration]);
+
+  const togglePlayback = () => setIsPlaying(!isPlaying);
+
+  const handleSeek = (ms: number) => {
+    const safeMs = Math.max(0, Math.min(ms, timelineData?.duration || 0));
+    setPlayheadPos(safeMs);
+    // Sync video player to local clip offset
+    if (activeClip && activeClip.type === 'video' && safeMs >= activeClip.start) {
+      const clipOffset = (safeMs - activeClip.start) + activeClip.mediaStart;
+      player.seekBy(clipOffset / 1000 - player.currentTime);
+    }
+  };
+
+  const handleSplit = () => {
+    if (selectedClipId) {
+      splitClip(selectedClipId, playheadPos);
+    }
+  };
+
+  const handleDelete = () => {
+    if (selectedClipId) {
+      deleteClip(selectedClipId);
+    }
+  };
+
+  const formatTime = (ms: number) => {
+    const s = Math.floor(ms / 1000);
+    const m = Math.floor(s / 60);
+    return `${m}:${(s % 60).toString().padStart(2, '0')}.${Math.floor((ms % 1000)/100)}`;
+  };
 
   return (
     <View style={[styles.container, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
@@ -75,7 +170,7 @@ export default function EditorScreen({ route, navigation }: EditorScreenProps) {
             style={styles.mediaPreview}
             player={player}
             allowsPictureInPicture={false}
-            nativeControls={true}
+            nativeControls={false}
           />
         ) : activeClip?.type === 'image' ? (
           <Image
@@ -85,39 +180,44 @@ export default function EditorScreen({ route, navigation }: EditorScreenProps) {
           />
         ) : (
           <View style={styles.emptyPreview}>
-            <Text style={styles.emptyText}>No Media Selected</Text>
+            <Text style={styles.emptyText}>No Media at Playhead</Text>
           </View>
         )}
       </View>
 
       <View style={styles.timelineContainer}>
         <View style={styles.timelineToolbar}>
-          <Text style={{ ...typography.button, color: colors.text }}>Timeline</Text>
-          <Text style={{ color: colors.textSecondary }}>{(timelineData?.duration || 0) / 1000}s</Text>
+          <Text style={styles.timecode}>{formatTime(playheadPos)} / {formatTime(timelineData?.duration || 0)}</Text>
+          <TouchableOpacity style={styles.playButton} onPress={togglePlayback}>
+            {isPlaying ? <Pause color={colors.background} size={20} /> : <Play color={colors.background} size={20} />}
+          </TouchableOpacity>
         </View>
 
-        <View style={styles.timelineTracksPlaceholder}>
-          <View style={styles.playhead} />
-          {timelineData?.tracks?.map(track => (
-            <View key={track.id} style={styles.trackPlaceholder}>
-              {track.clips.map(clip => (
-                <View key={clip.id} style={styles.clipBlock}>
-                  <Text style={{ fontSize: 12, color: colors.text }} numberOfLines={1}>
-                    {clip.type === 'video' ? '🎬' : '📷'} Clip
-                  </Text>
-                </View>
-              ))}
-            </View>
-          ))}
+        <View style={styles.timelineWrapper}>
+          <Timeline playheadPosition={playheadPos} onSeek={handleSeek} />
         </View>
       </View>
 
+      {/* Editor Context Menu */}
       <View style={styles.toolsMenu}>
-        {['Edit', 'Audio', 'Text', 'Filters'].map(tool => (
-          <TouchableOpacity key={tool} style={styles.toolItem}>
-            <Text style={styles.toolText}>{tool}</Text>
-          </TouchableOpacity>
-        ))}
+        {selectedClipId ? (
+          <>
+            <TouchableOpacity style={styles.toolItem} onPress={handleSplit}>
+              <Scissors color={colors.text} size={24} />
+              <Text style={styles.toolText}>Split</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.toolItem} onPress={handleDelete}>
+              <Trash2 color={colors.danger} size={24} />
+              <Text style={[styles.toolText, { color: colors.danger }]}>Delete</Text>
+            </TouchableOpacity>
+          </>
+        ) : (
+          ['Edit', 'Audio', 'Text', 'Filters'].map(tool => (
+            <TouchableOpacity key={tool} style={styles.toolItem}>
+              <Text style={styles.toolText}>{tool}</Text>
+            </TouchableOpacity>
+          ))
+        )}
       </View>
     </View>
   );
@@ -140,11 +240,10 @@ const styles = StyleSheet.create({
   emptyText: { ...typography.body, color: colors.textSecondary },
 
   timelineContainer: { height: 250, backgroundColor: colors.surface, borderTopLeftRadius: 16, borderTopRightRadius: 16 },
-  timelineToolbar: { flexDirection: 'row', justifyContent: 'space-between', padding: 16, borderBottomWidth: 1, borderBottomColor: colors.border },
-  timelineTracksPlaceholder: { flex: 1, padding: 16, paddingTop: 32, position: 'relative' },
-  playhead: { position: 'absolute', left: '50%', top: 0, bottom: 0, width: 2, backgroundColor: colors.primary, zIndex: 10 },
-  trackPlaceholder: { height: 60, backgroundColor: colors.background, borderRadius: 8, flexDirection: 'row', alignItems: 'center', padding: 4, marginBottom: 8 },
-  clipBlock: { backgroundColor: colors.border, height: '100%', minWidth: 100, borderRadius: 6, justifyContent: 'center', paddingHorizontal: 8, marginRight: 4, borderColor: colors.secondary, borderWidth: 1 },
+  timelineToolbar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 16, borderBottomWidth: 1, borderBottomColor: colors.border },
+  timecode: { ...typography.caption, color: colors.primary, fontVariant: ['tabular-nums'] },
+  playButton: { backgroundColor: colors.primary, width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center' },
+  timelineWrapper: { flex: 1 },
 
   toolsMenu: { flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center', paddingVertical: 12, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.background },
   toolItem: { alignItems: 'center', padding: 8 },

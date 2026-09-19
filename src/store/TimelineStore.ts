@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { TimelineData, Clip } from '../types/models';
+import { TimelineData, Clip, Track } from '../types/models';
 import uuid from 'react-native-uuid';
 import { ProjectService } from '../database/ProjectService';
 import { Project } from '../types/models';
@@ -7,66 +7,197 @@ import { Project } from '../types/models';
 interface TimelineState {
   currentProject: Project | null;
   timelineData: TimelineData;
+  selectedClipId: string | null;
+
+  // Phase 1
   loadProjectTimeline: (project: Project) => void;
   addClipsToMainTrack: (assets: any[]) => Promise<void>;
   saveTimelineToProject: () => Promise<void>;
+
+  // Phase 2
+  selectClip: (clipId: string | null) => void;
+  deleteClip: (clipId: string) => Promise<void>;
+  splitClip: (clipId: string, splitTimeAtTimeline: number) => Promise<void>;
+  trimClip: (clipId: string, startTrimAmount: number, endTrimAmount: number) => Promise<void>;
+  reorderClips: (trackId: string, fromIndex: number, toIndex: number) => Promise<void>;
 }
+
+// Utility to recalculate timeline starts and total duration based on clips lengths in a sequence
+const recalculateTrackTiming = (tracks: Track[]) => {
+  let maxDuration = 0;
+
+  const updatedTracks = tracks.map(track => {
+    let currentStart = 0;
+    const updatedClips = track.clips.map(clip => {
+      const updatedClip = { ...clip, start: currentStart };
+      currentStart += clip.duration;
+      return updatedClip;
+    });
+    if (currentStart > maxDuration) {
+      maxDuration = currentStart;
+    }
+    return { ...track, clips: updatedClips };
+  });
+
+  return { tracks: updatedTracks, duration: maxDuration };
+};
 
 export const useTimelineStore = create<TimelineState>((set, get) => ({
   currentProject: null,
   timelineData: { duration: 0, tracks: [] },
+  selectedClipId: null,
 
   loadProjectTimeline: (project) => {
     try {
       const parsedData = JSON.parse(project.timelineData);
-      set({ currentProject: project, timelineData: parsedData });
+      // Ensure timings are calculated correctly on load just in case
+      const { tracks, duration } = recalculateTrackTiming(parsedData.tracks || []);
+      set({ currentProject: project, timelineData: { tracks, duration }, selectedClipId: null });
     } catch (e) {
-      set({ currentProject: project, timelineData: { duration: 0, tracks: [] } });
+      set({ currentProject: project, timelineData: { duration: 0, tracks: [] }, selectedClipId: null });
     }
   },
 
+  selectClip: (clipId) => set({ selectedClipId: clipId }),
+
   addClipsToMainTrack: async (assets) => {
-    const { timelineData, currentProject, saveTimelineToProject } = get();
-    if (!currentProject) return;
+    const { timelineData, saveTimelineToProject } = get();
 
-    let mainTrack = timelineData.tracks.find(t => t.type === 'video' && t.id === 'main');
+    let mainTrackIndex = timelineData.tracks.findIndex(t => t.type === 'video' && t.id === 'main');
+    let tracks = [...timelineData.tracks];
 
-    if (!mainTrack) {
-      mainTrack = { id: 'main', type: 'video', clips: [] };
-      timelineData.tracks.unshift(mainTrack);
+    if (mainTrackIndex === -1) {
+      tracks.unshift({ id: 'main', type: 'video', clips: [] });
+      mainTrackIndex = 0;
     }
 
-    let currentStart = mainTrack.clips.reduce((acc, clip) => acc + clip.duration, 0);
-
+    const mainTrack = { ...tracks[mainTrackIndex] };
     const newClips: Clip[] = assets.map(asset => {
-      // expo-image-picker asset duration is in ms if it's a video
-      const duration = asset.type === 'video' && asset.duration ? asset.duration : 3000; // 3 seconds default for images
-
-      const clip: Clip = {
+      const duration = asset.type === 'video' && asset.duration ? asset.duration : 3000;
+      return {
         id: uuid.v4() as string,
         mediaUri: asset.uri,
         type: asset.type === 'video' ? 'video' : 'image',
-        start: currentStart,
+        start: 0, // Will be recalculated
         duration: duration,
         mediaStart: 0,
         mediaDuration: duration
       };
-
-      currentStart += duration;
-      return clip;
     });
 
-    mainTrack.clips.push(...newClips);
+    mainTrack.clips = [...mainTrack.clips, ...newClips];
+    tracks[mainTrackIndex] = mainTrack;
 
-    // Update total timeline duration
-    const newTotalDuration = Math.max(timelineData.duration, currentStart);
+    const { tracks: recalculatedTracks, duration } = recalculateTrackTiming(tracks);
 
-    const updatedTimelineData = {
-      ...timelineData,
-      duration: newTotalDuration
-    };
+    set({ timelineData: { tracks: recalculatedTracks, duration } });
+    await saveTimelineToProject();
+  },
 
-    set({ timelineData: updatedTimelineData });
+  deleteClip: async (clipId: string) => {
+    const { timelineData, selectedClipId, saveTimelineToProject } = get();
+
+    const updatedTracks = timelineData.tracks.map(track => ({
+      ...track,
+      clips: track.clips.filter(c => c.id !== clipId)
+    }));
+
+    const { tracks, duration } = recalculateTrackTiming(updatedTracks);
+
+    set({
+      timelineData: { tracks, duration },
+      selectedClipId: selectedClipId === clipId ? null : selectedClipId
+    });
+
+    await saveTimelineToProject();
+  },
+
+  splitClip: async (clipId: string, splitTimeAtTimeline: number) => {
+    const { timelineData, saveTimelineToProject } = get();
+
+    let modified = false;
+    const updatedTracks = timelineData.tracks.map(track => {
+      const clipIndex = track.clips.findIndex(c => c.id === clipId);
+      if (clipIndex === -1) return track;
+
+      const clip = track.clips[clipIndex];
+      // Verify split point is within clip
+      if (splitTimeAtTimeline <= clip.start || splitTimeAtTimeline >= clip.start + clip.duration) {
+        return track;
+      }
+
+      const splitOffset = splitTimeAtTimeline - clip.start;
+
+      const firstHalf: Clip = {
+        ...clip,
+        duration: splitOffset
+      };
+
+      const secondHalf: Clip = {
+        ...clip,
+        id: uuid.v4() as string,
+        mediaStart: clip.mediaStart + splitOffset,
+        duration: clip.duration - splitOffset
+      };
+
+      const newClips = [...track.clips];
+      newClips.splice(clipIndex, 1, firstHalf, secondHalf);
+      modified = true;
+
+      return { ...track, clips: newClips };
+    });
+
+    if (modified) {
+      const { tracks, duration } = recalculateTrackTiming(updatedTracks);
+      set({ timelineData: { tracks, duration } });
+      await saveTimelineToProject();
+    }
+  },
+
+  trimClip: async (clipId: string, startTrimAmount: number, endTrimAmount: number) => {
+    // startTrimAmount > 0 means shaving off from start (e.g. 500ms)
+    // endTrimAmount > 0 means shaving off from end
+    const { timelineData, saveTimelineToProject } = get();
+
+    const updatedTracks = timelineData.tracks.map(track => {
+      const clipIndex = track.clips.findIndex(c => c.id === clipId);
+      if (clipIndex === -1) return track;
+
+      const clip = track.clips[clipIndex];
+      const newDuration = Math.max(100, clip.duration - startTrimAmount - endTrimAmount); // minimum 100ms
+      const actualTrimStart = clip.duration - newDuration - endTrimAmount; // Adjust in case it hit the 100ms floor
+
+      const updatedClip: Clip = {
+        ...clip,
+        mediaStart: clip.mediaStart + actualTrimStart,
+        duration: newDuration
+      };
+
+      const newClips = [...track.clips];
+      newClips[clipIndex] = updatedClip;
+      return { ...track, clips: newClips };
+    });
+
+    const { tracks, duration } = recalculateTrackTiming(updatedTracks);
+    set({ timelineData: { tracks, duration } });
+    await saveTimelineToProject();
+  },
+
+  reorderClips: async (trackId: string, fromIndex: number, toIndex: number) => {
+    const { timelineData, saveTimelineToProject } = get();
+
+    const updatedTracks = timelineData.tracks.map(track => {
+      if (track.id !== trackId) return track;
+
+      const newClips = [...track.clips];
+      const [movedClip] = newClips.splice(fromIndex, 1);
+      newClips.splice(toIndex, 0, movedClip);
+
+      return { ...track, clips: newClips };
+    });
+
+    const { tracks, duration } = recalculateTrackTiming(updatedTracks);
+    set({ timelineData: { tracks, duration } });
     await saveTimelineToProject();
   },
 
@@ -77,7 +208,6 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
     const updatedProject = {
       ...currentProject,
       timelineData: JSON.stringify(timelineData),
-      // Update thumbnail if main track has clips and no thumbnail exists
       thumbnailUri: currentProject.thumbnailUri ||
                    (timelineData.tracks[0]?.clips[0]?.mediaUri ?? null)
     };
