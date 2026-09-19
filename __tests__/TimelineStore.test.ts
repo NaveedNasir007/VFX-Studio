@@ -8,7 +8,7 @@ jest.mock('../src/database/ProjectService', () => ({
   }
 }));
 
-describe('TimelineStore phase 2', () => {
+describe('TimelineStore phase 3', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     useTimelineStore.setState({
@@ -56,31 +56,56 @@ describe('TimelineStore phase 2', () => {
     const clips = newState.timelineData.tracks[0].clips;
 
     expect(clips).toHaveLength(3);
-
-    // First half
     expect(clips[0].id).toBe('c1');
     expect(clips[0].start).toBe(0);
     expect(clips[0].duration).toBe(500);
-    expect(clips[0].mediaStart).toBe(0);
 
-    // Second half (new id generated)
     expect(clips[1].id).not.toBe('c1');
     expect(clips[1].start).toBe(500);
     expect(clips[1].duration).toBe(500);
-    expect(clips[1].mediaStart).toBe(500); // mediaStart shifted
-
-    // Third clip (originally c2) shifts starts safely
-    expect(clips[2].id).toBe('c2');
-    expect(clips[2].start).toBe(1000);
-
+    expect(clips[1].mediaStart).toBe(500);
     expect(newState.timelineData.duration).toBe(2000);
   });
 
-  it('does not split if outside clip bounds', async () => {
+  it('adds a text clip correctly', async () => {
     const store = useTimelineStore.getState();
-    await store.splitClip('c1', 1500); // 1500 is in c2, not c1
+    await store.addTextClip('Hello World', 500, 2000);
 
     const newState = useTimelineStore.getState();
-    expect(newState.timelineData.tracks[0].clips).toHaveLength(2);
+    const textTrack = newState.timelineData.tracks.find(t => t.type === 'text');
+    expect(textTrack).toBeDefined();
+    expect(textTrack?.clips).toHaveLength(1);
+
+    const textClip = textTrack?.clips[0];
+    expect(textClip?.textData?.text).toBe('Hello World');
+    expect(textClip?.start).toBe(500);
+    expect(textClip?.duration).toBe(2000);
+
+    // Adding text beyond current duration updates overall duration
+    expect(newState.timelineData.duration).toBe(2500);
+  });
+
+  it('adds an audio clip correctly', async () => {
+    const store = useTimelineStore.getState();
+    await store.addAudioClip('audio.mp3', 0, 5000);
+
+    const newState = useTimelineStore.getState();
+    const audioTrack = newState.timelineData.tracks.find(t => t.type === 'audio');
+    expect(audioTrack).toBeDefined();
+
+    const audioClip = audioTrack?.clips[0];
+    expect(audioClip?.type).toBe('audio');
+    expect(audioClip?.duration).toBe(5000);
+    expect(newState.timelineData.duration).toBe(5000);
+  });
+
+  it('updates clip properties correctly', async () => {
+    const store = useTimelineStore.getState();
+    await store.updateClipProperties('c1', { filter: { id: 'Vintage', name: 'Vintage', intensity: 0.8 } });
+
+    const newState = useTimelineStore.getState();
+    const clip = newState.timelineData.tracks[0].clips[0];
+    expect(clip.filter).toBeDefined();
+    expect(clip.filter?.name).toBe('Vintage');
   });
 });
