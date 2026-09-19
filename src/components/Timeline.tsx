@@ -39,8 +39,8 @@ export default function Timeline({ playheadPosition, onSeek }: TimelineProps) {
           let icon = '🎬';
           let bgColor = colors.border;
           if (clip.type === 'image') icon = '📷';
-          if (clip.type === 'text') { icon = 'T'; bgColor = '#4A5568'; } // grayish blue
-          if (clip.type === 'audio') { icon = '🎵'; bgColor = '#2F855A'; } // greenish
+          if (clip.type === 'text' || clip.type === 'caption') { icon = 'T'; bgColor = '#4A5568'; } // grayish blue
+          if (clip.type === 'audio' || clip.type === 'voiceover') { icon = '🎤'; bgColor = '#2F855A'; } // greenish
 
           return (
             <TouchableOpacity
@@ -64,9 +64,9 @@ export default function Timeline({ playheadPosition, onSeek }: TimelineProps) {
   };
 
   // Order tracks: Text top, Video middle, Audio bottom
-  const textTracks = timelineData.tracks.filter(t => t.type === 'text' || t.type === 'sticker');
+  const textTracks = timelineData.tracks.filter(t => t.type === 'text' || t.type === 'sticker' || t.type === 'caption');
   const videoTracks = timelineData.tracks.filter(t => t.type === 'video');
-  const audioTracks = timelineData.tracks.filter(t => t.type === 'audio');
+  const audioTracks = timelineData.tracks.filter(t => t.type === 'audio' || t.type === 'voiceover');
 
   return (
     <View style={styles.container}>

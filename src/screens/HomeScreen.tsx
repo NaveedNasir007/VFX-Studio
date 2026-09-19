@@ -1,7 +1,7 @@
 import React, { useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, FlatList, Image } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, FlatList, Image, ScrollView } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Plus, Settings, Video, Film, Trash2 } from 'lucide-react-native';
+import { Plus, Settings, Video, Film, Trash2, LayoutTemplate } from 'lucide-react-native';
 import { colors } from '../theme/colors';
 import { typography } from '../theme/typography';
 import { HomeScreenProps } from '../navigation/types';
@@ -9,10 +9,11 @@ import { useProjectStore } from '../store/ProjectStore';
 import { useTimelineStore } from '../store/TimelineStore';
 import { pickMedia } from '../utils/mediaPicker';
 import { formatDistanceToNow } from 'date-fns';
+import { Template } from '../types/models';
 
 export default function HomeScreen({ navigation }: HomeScreenProps) {
   const insets = useSafeAreaInsets();
-  const { projects, loadProjects, createEmptyProject, deleteProject } = useProjectStore();
+  const { projects, templates, loadProjects, createEmptyProject, createProjectFromTemplate, deleteProject } = useProjectStore();
   const { addClipsToMainTrack, loadProjectTimeline } = useTimelineStore();
 
   useEffect(() => {
@@ -25,10 +26,17 @@ export default function HomeScreen({ navigation }: HomeScreenProps) {
       const project = await createEmptyProject();
       loadProjectTimeline(project);
       await addClipsToMainTrack(assets);
-      // Reload projects list to reflect new project and thumbnail
       await loadProjects();
       navigation.navigate('Editor', { projectId: project.id });
     }
+  };
+
+  const handleUseTemplate = async (template: Template) => {
+    // In a full build, this would prompt the user to pick `template.expectedMediaCount` assets first to map into the blueprint.
+    // For this architectural implementation, we instantiate the structure empty and let them fill it in Editor.
+    const project = await createProjectFromTemplate(template);
+    await loadProjects();
+    navigation.navigate('Editor', { projectId: project.id });
   };
 
   const renderProjectCard = ({ item }: { item: any }) => (
@@ -61,7 +69,7 @@ export default function HomeScreen({ navigation }: HomeScreenProps) {
   );
 
   return (
-    <View style={[styles.container, { paddingTop: insets.top }]}>
+    <ScrollView style={[styles.container, { paddingTop: insets.top }]}>
       <View style={styles.header}>
         <Text style={styles.title}>VFX Studio</Text>
         <TouchableOpacity style={styles.settingsButton}>
@@ -78,23 +86,37 @@ export default function HomeScreen({ navigation }: HomeScreenProps) {
         </TouchableOpacity>
       </View>
 
+      {/* Phase 6: Templates Section */}
+      <View style={styles.templatesSection}>
+        <Text style={styles.sectionTitle}>Templates</Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.templatesScroll}>
+          {templates.map(t => (
+            <TouchableOpacity key={t.id} style={styles.templateCard} onPress={() => handleUseTemplate(t)}>
+              <Image source={{uri: t.thumbnailUri}} style={styles.templateThumbnail} />
+              <View style={styles.templateOverlay}>
+                <LayoutTemplate color={colors.text} size={20} />
+                <Text style={styles.templateName}>{t.name}</Text>
+              </View>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      </View>
+
       <View style={styles.projectsSection}>
         <Text style={styles.sectionTitle}>Recent Projects</Text>
-        <FlatList
-          data={projects}
-          keyExtractor={(item) => item.id}
-          renderItem={renderProjectCard}
-          contentContainerStyle={styles.projectsList}
-          ListEmptyComponent={
-            <View style={styles.emptyState}>
-              <Video color={colors.secondary} size={48} />
-              <Text style={styles.emptyStateText}>No projects yet</Text>
-              <Text style={styles.emptyStateSubText}>Create a new project to get started</Text>
-            </View>
-          }
-        />
+        {projects.length === 0 ? (
+          <View style={styles.emptyState}>
+            <Video color={colors.secondary} size={48} />
+            <Text style={styles.emptyStateText}>No projects yet</Text>
+            <Text style={styles.emptyStateSubText}>Create a new project to get started</Text>
+          </View>
+        ) : (
+          projects.map(p => <View key={p.id}>{renderProjectCard({item: p})}</View>)
+        )}
       </View>
-    </View>
+
+      <View style={{height: 100}}/>
+    </ScrollView>
   );
 }
 
@@ -107,9 +129,16 @@ const styles = StyleSheet.create({
   newProjectButton: { backgroundColor: colors.primary, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 16, borderRadius: 16 },
   newProjectIconContainer: { marginRight: 12 },
   newProjectText: { ...typography.h2, color: colors.background },
-  projectsSection: { flex: 1, paddingHorizontal: 20 },
+
+  templatesSection: { paddingLeft: 20, marginBottom: 24 },
   sectionTitle: { ...typography.h2, marginBottom: 16 },
-  projectsList: { paddingBottom: 40 },
+  templatesScroll: { paddingRight: 20 },
+  templateCard: { width: 140, height: 200, borderRadius: 12, overflow: 'hidden', marginRight: 16, backgroundColor: colors.surface },
+  templateThumbnail: { width: '100%', height: '100%', position: 'absolute' },
+  templateOverlay: { position: 'absolute', bottom: 0, left: 0, right: 0, padding: 12, backgroundColor: 'rgba(0,0,0,0.6)' },
+  templateName: { color: colors.text, fontSize: 14, fontWeight: 'bold', marginTop: 4 },
+
+  projectsSection: { paddingHorizontal: 20 },
   projectCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.surface, borderRadius: 16, padding: 12, marginBottom: 12 },
   thumbnailContainer: { width: 80, height: 80, borderRadius: 12, overflow: 'hidden', backgroundColor: colors.border },
   thumbnail: { width: '100%', height: '100%' },
