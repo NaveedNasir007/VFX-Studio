@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { TimelineData, Clip, Track, TransitionData, EffectData } from '../types/models';
+import { TimelineData, Clip, Track, TransitionData, EffectData, KeyframeData, ChromaKeyData, MaskData } from '../types/models';
 import uuid from 'react-native-uuid';
 import { ProjectService } from '../database/ProjectService';
 import { Project } from '../types/models';
@@ -32,21 +32,25 @@ interface TimelineState {
   applyTransition: (clipId: string, transition: TransitionData, position: 'in' | 'out') => Promise<void>;
   applyEffect: (clipId: string, effect: EffectData) => Promise<void>;
   insertFreezeFrame: (clipId: string, atTimelineMs: number) => Promise<void>;
+
+  // Phase 5
+  addOverlayClip: (mediaUri: string, type: 'video'|'image', startMs: number, durationMs: number) => Promise<void>;
+  updateChromaKey: (clipId: string, chromaKey: ChromaKeyData) => Promise<void>;
+  updateMask: (clipId: string, mask: MaskData) => Promise<void>;
+  addKeyframe: (clipId: string, relativeTimeMs: number, property: KeyframeData['property'], value: KeyframeData['value']) => Promise<void>;
 }
 
 const recalculateTrackTiming = (tracks: Track[]) => {
   let maxDuration = 0;
 
   const updatedTracks = tracks.map(track => {
-    if (track.type === 'video' && track.id === 'main') {
+    if (track.type === 'video' && track.id === 'main' && !track.isOverlay) {
       let currentStart = 0;
       const updatedClips = track.clips.map(clip => {
-        // If clip has speed, duration is scaled relative to mediaDuration
         let calculatedDuration = clip.duration;
         if (clip.speed && clip.speed !== 1) {
            calculatedDuration = Math.round((clip.mediaDuration - clip.mediaStart) / clip.speed);
         }
-
         const updatedClip = { ...clip, start: currentStart, duration: calculatedDuration };
         currentStart += calculatedDuration;
         return updatedClip;
@@ -88,7 +92,7 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
     let tracks = [...timelineData.tracks];
 
     if (mainTrackIndex === -1) {
-      tracks.unshift({ id: 'main', type: 'video', clips: [] });
+      tracks.unshift({ id: 'main', type: 'video', clips: [], isOverlay: false });
       mainTrackIndex = 0;
     }
 
@@ -220,15 +224,10 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
       }
 
       const splitOffset = splitTimeAtTimeline - clip.start;
-
       const speed = clip.speed || 1;
       const splitMediaOffset = splitOffset * speed;
 
-      const firstHalf: Clip = {
-        ...clip,
-        duration: splitOffset
-      };
-
+      const firstHalf: Clip = { ...clip, duration: splitOffset };
       const secondHalf: Clip = {
         ...clip,
         id: uuid.v4() as string,
@@ -258,7 +257,6 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 
       const clip = track.clips[clipIndex];
       const speed = clip.speed || 1;
-
       const newDuration = Math.max(100, clip.duration - startTrimAmount - endTrimAmount);
       const actualTrimStart = clip.duration - newDuration - endTrimAmount;
 
@@ -294,11 +292,9 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
     await saveTimelineToProject();
   },
 
-  // Phase 4 specific actions
   updateClipSpeed: async (clipId: string, speedMultiplier: number) => {
     const { updateClipProperties } = get();
     await updateClipProperties(clipId, { speed: speedMultiplier });
-    // recalculateTrackTiming in updateClipProperties will naturally stretch/compress the clip's duration based on the new speed.
   },
 
   toggleClipReverse: async (clipId: string) => {
@@ -324,37 +320,24 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 
   insertFreezeFrame: async (clipId: string, atTimelineMs: number) => {
     const { timelineData, splitClip, saveTimelineToProject } = get();
-
-    // First, split the clip exactly at the playhead
     await splitClip(clipId, atTimelineMs);
-
-    // Refresh state after split
     const currentData = get().timelineData;
     let modified = false;
-
     const updatedTracks = currentData.tracks.map(track => {
       if (track.id !== 'main') return track;
-
-      // The split action created a new clip that starts exactly at atTimelineMs.
       const secondHalfIndex = track.clips.findIndex(c => c.start === atTimelineMs && c.type === 'video');
-
       if (secondHalfIndex > 0) {
         const firstHalf = track.clips[secondHalfIndex - 1];
-
-        // Create a 3-second freeze frame clip referencing the exact frame
-        // In reality, mediaUri points to the video, but we tag it as an image to indicate freeze
         const freezeClip: Clip = {
           id: uuid.v4() as string,
-          mediaUri: firstHalf.mediaUri, // The original video URI
-          type: 'image', // Treated as a static frame for 3 seconds
+          mediaUri: firstHalf.mediaUri,
+          type: 'image',
           start: atTimelineMs,
           duration: 3000,
-          mediaStart: firstHalf.mediaStart + (firstHalf.duration * (firstHalf.speed || 1)), // The exact frame to freeze
+          mediaStart: firstHalf.mediaStart + (firstHalf.duration * (firstHalf.speed || 1)),
           mediaDuration: 3000
         };
-
         const newClips = [...track.clips];
-        // Insert freeze frame between the two split halves
         newClips.splice(secondHalfIndex, 0, freezeClip);
         modified = true;
         return { ...track, clips: newClips };
@@ -367,6 +350,76 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
       set({ timelineData: { tracks, duration } });
       await saveTimelineToProject();
     }
+  },
+
+  // Phase 5 Methods
+  addOverlayClip: async (mediaUri, type, startMs, durationMs) => {
+    const { timelineData, saveTimelineToProject } = get();
+    let overlayTrackIndex = timelineData.tracks.findIndex(t => t.isOverlay);
+    let tracks = [...timelineData.tracks];
+
+    if (overlayTrackIndex === -1) {
+      tracks.push({ id: `overlay_${uuid.v4()}`, type: 'video', isOverlay: true, clips: [] });
+      overlayTrackIndex = tracks.length - 1;
+    }
+
+    const overlayClip: Clip = {
+      id: uuid.v4() as string,
+      mediaUri,
+      type,
+      start: startMs,
+      duration: durationMs,
+      mediaStart: 0,
+      mediaDuration: durationMs,
+      scale: 0.5, // Start overlays at 50% scale
+      positionX: 0,
+      positionY: 0
+    };
+
+    const overlayTrack = { ...tracks[overlayTrackIndex] };
+    overlayTrack.clips = [...overlayTrack.clips, overlayClip];
+    tracks[overlayTrackIndex] = overlayTrack;
+
+    const { tracks: recalculatedTracks, duration } = recalculateTrackTiming(tracks);
+    set({ timelineData: { tracks: recalculatedTracks, duration } });
+    await saveTimelineToProject();
+  },
+
+  updateChromaKey: async (clipId, chromaKey) => {
+    await get().updateClipProperties(clipId, { chromaKey });
+  },
+
+  updateMask: async (clipId, mask) => {
+    await get().updateClipProperties(clipId, { mask });
+  },
+
+  addKeyframe: async (clipId, relativeTimeMs, property, value) => {
+    const { timelineData, updateClipProperties } = get();
+    let currentKeyframes: KeyframeData[] = [];
+
+    // Find existing keyframes
+    for (const track of timelineData.tracks) {
+      const clip = track.clips.find(c => c.id === clipId);
+      if (clip && clip.keyframes) {
+        currentKeyframes = [...clip.keyframes];
+        break;
+      }
+    }
+
+    // Replace if exact time/prop exists, else push
+    const existingIndex = currentKeyframes.findIndex(k => k.timeMs === relativeTimeMs && k.property === property);
+    const newKeyframe: KeyframeData = { id: uuid.v4() as string, timeMs: relativeTimeMs, property, value };
+
+    if (existingIndex >= 0) {
+      currentKeyframes[existingIndex] = newKeyframe;
+    } else {
+      currentKeyframes.push(newKeyframe);
+    }
+
+    // Sort chronological
+    currentKeyframes.sort((a, b) => a.timeMs - b.timeMs);
+
+    await updateClipProperties(clipId, { keyframes: currentKeyframes });
   },
 
   saveTimelineToProject: async () => {
