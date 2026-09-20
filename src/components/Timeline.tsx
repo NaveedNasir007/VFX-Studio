@@ -1,5 +1,6 @@
 import React, { useRef, useMemo, memo } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
+import { PanGestureHandler, State, GestureHandlerRootView } from 'react-native-gesture-handler';
 import { useTimelineStore } from '../store/TimelineStore';
 import { colors } from '../theme/colors';
 import { typography } from '../theme/typography';
@@ -15,13 +16,17 @@ const PIXELS_PER_MS = 0.05; // 1 second = 50 pixels
 // Memoized individual Clip component to prevent massive re-renders
 const TimelineClip = memo(({
   clip,
+  track,
   isSelected,
   onSelect
 }: {
   clip: Clip;
+  track: Track;
   isSelected: boolean;
   onSelect: (id: string) => void;
 }) => {
+  const moveClipPosition = useTimelineStore(state => state.moveClipPosition);
+
   const left = clip.start * PIXELS_PER_MS;
   const width = clip.duration * PIXELS_PER_MS;
 
@@ -31,20 +36,38 @@ const TimelineClip = memo(({
   if (clip.type === 'text' || clip.type === 'caption') { icon = 'T'; bgColor = '#4A5568'; }
   if (clip.type === 'audio' || clip.type === 'voiceover') { icon = '🎤'; bgColor = '#2F855A'; }
 
+  const isMainTrack = track.type === 'video' && track.id === 'main' && !track.isOverlay;
+
+  // Gesture handling for free-moving clips (non-main sequence)
+  const handlePan = (event: any) => {
+    if (isMainTrack) return; // Sequence tracks can't be freely moved, only reordered via UI
+    const { translationX, state } = event.nativeEvent;
+
+    if (state === State.END) {
+      const msDelta = translationX / PIXELS_PER_MS;
+      const newStart = Math.max(0, clip.start + msDelta);
+      moveClipPosition(clip.id, newStart);
+    }
+  };
+
   return (
-    <TouchableOpacity
-      activeOpacity={0.8}
-      style={[
-        styles.clip,
-        { left, width, backgroundColor: bgColor },
-        isSelected && styles.clipSelected
-      ]}
-      onPress={() => onSelect(clip.id)}
-    >
-      <Text style={styles.clipText} numberOfLines={1}>
-        {icon} {clip.textData?.text ? `"${clip.textData.text}"` : ''}
-      </Text>
-    </TouchableOpacity>
+    <PanGestureHandler onHandlerStateChange={handlePan} enabled={!isMainTrack}>
+      <View style={{position: 'absolute', left, width, height: '100%'}}>
+        <TouchableOpacity
+          activeOpacity={0.8}
+          style={[
+            styles.clip,
+            { backgroundColor: bgColor },
+            isSelected && styles.clipSelected
+          ]}
+          onPress={() => onSelect(clip.id)}
+        >
+          <Text style={styles.clipText} numberOfLines={1}>
+            {icon} {clip.textData?.text ? `"${clip.textData.text}"` : ''}
+          </Text>
+        </TouchableOpacity>
+      </View>
+    </PanGestureHandler>
   );
 }, (prevProps, nextProps) => {
   return prevProps.clip === nextProps.clip && prevProps.isSelected === nextProps.isSelected;
@@ -69,6 +92,7 @@ const TimelineTrack = memo(({
         <TimelineClip
           key={clip.id}
           clip={clip}
+          track={track}
           isSelected={selectedClipId === clip.id}
           onSelect={onSelect}
         />
@@ -99,7 +123,7 @@ export default function Timeline({ playheadPosition, onSeek }: TimelineProps) {
   }, [timelineData.tracks]);
 
   return (
-    <View style={styles.container}>
+    <GestureHandlerRootView style={styles.container}>
       <ScrollView
         ref={scrollViewRef}
         horizontal
@@ -120,7 +144,7 @@ export default function Timeline({ playheadPosition, onSeek }: TimelineProps) {
           <View style={[styles.playhead, { left: playheadPosition * PIXELS_PER_MS }]} pointerEvents="none" />
         </TouchableOpacity>
       </ScrollView>
-    </View>
+    </GestureHandlerRootView>
   );
 }
 
@@ -131,7 +155,7 @@ const styles = StyleSheet.create({
   track: { height: 50, backgroundColor: colors.surface, marginBottom: 4, borderRadius: 8, position: 'relative' },
   textTrack: { height: 36, backgroundColor: 'transparent' },
   audioTrack: { height: 36, backgroundColor: colors.surface, opacity: 0.8 },
-  clip: { position: 'absolute', height: '100%', borderRadius: 6, borderWidth: 1, borderColor: colors.secondary, justifyContent: 'center', paddingHorizontal: 8 },
+  clip: { width: '100%', height: '100%', borderRadius: 6, borderWidth: 1, borderColor: colors.secondary, justifyContent: 'center', paddingHorizontal: 8 },
   clipSelected: { borderColor: colors.primary, borderWidth: 2, backgroundColor: colors.surfaceGlass },
   clipText: { ...typography.caption, color: colors.text, fontSize: 11 },
   playhead: { position: 'absolute', top: 0, bottom: 0, width: 2, backgroundColor: colors.primary, zIndex: 10, transform: [{ translateX: -1 }] }

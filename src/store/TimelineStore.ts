@@ -42,6 +42,9 @@ interface TimelineState {
   // Phase 6
   addVoiceover: (mediaUri: string, startMs: number, durationMs: number) => Promise<void>;
   addCaptions: (captions: { text: string; start: number; duration: number }[]) => Promise<void>;
+
+  // Phase 9
+  moveClipPosition: (clipId: string, newStartMs: number) => Promise<void>;
 }
 
 const recalculateTrackTiming = (tracks: Track[]) => {
@@ -49,6 +52,7 @@ const recalculateTrackTiming = (tracks: Track[]) => {
 
   const updatedTracks = tracks.map(track => {
     if (track.type === 'video' && track.id === 'main' && !track.isOverlay) {
+      // Main track is sequential
       let currentStart = 0;
       const updatedClips = track.clips.map(clip => {
         let calculatedDuration = clip.duration;
@@ -62,6 +66,7 @@ const recalculateTrackTiming = (tracks: Track[]) => {
       if (currentStart > maxDuration) maxDuration = currentStart;
       return { ...track, clips: updatedClips };
     } else {
+      // Other tracks (text, audio, overlay) are absolute positioned
       track.clips.forEach(clip => {
         const end = clip.start + clip.duration;
         if (end > maxDuration) maxDuration = end;
@@ -421,7 +426,6 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
     await updateClipProperties(clipId, { keyframes: currentKeyframes });
   },
 
-  // Phase 6 Methods
   addVoiceover: async (mediaUri: string, startMs: number, durationMs: number) => {
     const { timelineData, saveTimelineToProject } = get();
     let voTrackIndex = timelineData.tracks.findIndex(t => t.type === 'voiceover');
@@ -453,8 +457,6 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 
   addCaptions: async (captionsList: { text: string; start: number; duration: number }[]) => {
     const { timelineData, saveTimelineToProject } = get();
-
-    // Clear old captions track if it exists, replace with new generated one
     const tracks = timelineData.tracks.filter(t => t.type !== 'caption');
     const captionTrack: Track = { id: `caption_${uuid.v4()}`, type: 'caption', clips: [] };
 
@@ -484,6 +486,36 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
     const { tracks: recalculatedTracks, duration } = recalculateTrackTiming(tracks);
     set({ timelineData: { tracks: recalculatedTracks, duration } });
     await saveTimelineToProject();
+  },
+
+  // Phase 9
+  moveClipPosition: async (clipId: string, newStartMs: number) => {
+    const { timelineData, saveTimelineToProject } = get();
+
+    const safeStart = Math.max(0, newStartMs); // Prevent negative time
+    let modified = false;
+
+    const updatedTracks = timelineData.tracks.map(track => {
+      // Moving clips is only freely supported on non-main tracks (Overlays, Audio, Text)
+      // because main track clips are rigidly sequenced by recalculateTrackTiming
+      if (track.type === 'video' && track.id === 'main' && !track.isOverlay) {
+        return track;
+      }
+
+      const clipIndex = track.clips.findIndex(c => c.id === clipId);
+      if (clipIndex === -1) return track;
+
+      const newClips = [...track.clips];
+      newClips[clipIndex] = { ...newClips[clipIndex], start: safeStart };
+      modified = true;
+      return { ...track, clips: newClips };
+    });
+
+    if (modified) {
+      const { tracks, duration } = recalculateTrackTiming(updatedTracks);
+      set({ timelineData: { tracks, duration } });
+      await saveTimelineToProject();
+    }
   },
 
   saveTimelineToProject: async () => {

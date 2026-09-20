@@ -13,6 +13,7 @@ import { useProjectStore } from '../store/ProjectStore';
 import Timeline from '../components/Timeline';
 import { Clip } from '../types/models';
 import * as DocumentPicker from 'expo-document-picker';
+import { AIService } from '../core/AIService';
 import { pickMedia } from '../utils/mediaPicker';
 import { DebouncedSlider as Slider } from '../components/DebouncedSlider';
 
@@ -207,13 +208,15 @@ export default function EditorScreen({ route, navigation }: EditorScreenProps) {
   };
 
   const handleGenerateCaptions = async () => {
-    const mockCaptions = [
-      { text: "Welcome to VFX Studio.", start: 0, duration: 2000 },
-      { text: "This is a demonstration of auto captions.", start: 2000, duration: 3000 },
-      { text: "It scales automatically on the timeline.", start: 5000, duration: 2500 }
-    ];
-    await addCaptions(mockCaptions);
-    setActivePanel('main');
+    if (!activeVideoClip?.mediaUri) return;
+    try {
+      // Offload to real AI architecture
+      const generated = await AIService.generateCaptions(activeVideoClip.mediaUri);
+      await addCaptions(generated);
+      setActivePanel('main');
+    } catch (e) {
+      console.error(e);
+    }
   };
 
   const applyFilter = (filterName: string) => {
